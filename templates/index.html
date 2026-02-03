@@ -21,8 +21,7 @@
 <body>
     <div class="container">
         <h1>🧾 Ultimate レシート解析</h1>
-        <p><strong>Azure AI Vision 不使用 / 完全無料構成</strong><br>
-        Architecture: Azure VM (Ubuntu) + SQLite + OCR.space API</p>
+        <p><strong>Render + OCR.space API</strong> (Azure不使用 / 完全無料)</p>
         
         <div class="upload-area">
             <form method="post" enctype="multipart/form-data">
@@ -42,12 +41,13 @@
                         <th>価格</th>
                     </tr>
                 </thead>
-               <tbody>
-                {% for item in data.receipt_items %}  <tr>
-                    <td>{{ item.name }}</td>
-                    <td>¥{{ item.price }}</td>
-                </tr>
-                {% endfor %}
+                <tbody>
+                    {% for item in data.receipt_items %}
+                    <tr>
+                        <td>{{ item.name }}</td>
+                        <td>¥{{ item.price }}</td>
+                    </tr>
+                    {% endfor %}
                     <tr style="font-weight: bold; background: #eef;">
                         <td>合計</td>
                         <td>¥{{ data.total }}</td>
