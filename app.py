@@ -9,156 +9,145 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# OCR API 配置 (請確保 API_KEY 正確)
-API_KEY = 'K83802931788957'
+# 配置信息
+API_KEY = 'K83802931788957'  # 您的 OCR.space API Key
 DB_NAME = '/tmp/receipts.db'
 
 def init_db():
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS history 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                      filename TEXT, 
-                      total_price INTEGER, 
-                      upload_time TEXT)''')
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Database Init Error: {e}")
+    """初始化數據庫"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS history 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  filename TEXT, 
+                  total_price INTEGER, 
+                  upload_time TEXT)''')
+    conn.commit()
+    conn.close()
 
 init_db()
 
-def save_to_db(filename, total):
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("INSERT INTO history (filename, total_price, upload_time) VALUES (?, ?, ?)",
-                  (filename, total, str(datetime.now())))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Database Save Error: {e}")
+def clean_item_name(name):
+    """嚴格清洗商品名稱，移除 ◎, 輕, ※, 雜訊數字"""
+    if not name: return ""
+    # 1. 移除開頭的長串雜訊數字 (例如 OCR 誤認的 111213121)
+    name = re.sub(r'^\d{5,}', '', name)
+    # 2. 移除 ◎, 輕, ※, *, ¥, ￥ 以及空格 (根據老師要求：余計な文字は一切入れてはいけません)
+    name = re.sub(r'[◎輕軽※\*¥￥\s]', '', name)
+    return name.strip()
 
-def clean_text(text):
-    if not text: return ""
-    # 根據要求：保留 ◎，但移除「軽」、星號等雜質
-    text = re.sub(r'[軽※\*]', '', text)
-    # 移除行首可能出現的長序號數字（非商品名部分）
-    text = re.sub(r'^\d{5,}\s*', '', text)
-    return text.strip()
-
-def parse_receipt_safe(ocr_text):
+def parse_receipt(ocr_text):
+    """解析 OCR 文本並配對商品與價格"""
     if not ocr_text: return [], 0
     lines = ocr_text.splitlines()
-    items = []
-    total_amount = 0
     
-    # 關鍵字過濾：排除無關的收據資訊
-    ignore = ['電話', 'TEL', '新宿', '登録番号', 'レジ', '責No', '領収証', '対象', '內消費税', '交通系', '残高', 'カード番号', '再発行']
+    found_items = []
+    total_amount = 0
+    pending_name = None
+
+    # 排除清單：不視為商品的關鍵字
+    ignore_list = ['電話', 'TEL', '新宿', '登録番号', '2024', '2025', '対象', '消費税', '交通系', '残高', 'カード', '再発行', 'クーポン', '発行店']
 
     for line in lines:
         line = line.strip()
-        if not line or any(w in line for w in ignore): continue
-        if '2024' in line or '2025' in line: continue
-
-        # 1. 識別合計金額
-        if '合計' in line.replace(" ", ""):
-            # 抓取該行最後的數字
-            match_total = re.search(r'(\d+)', line.replace(",", "").replace("¥", "").replace("￥", ""))
-            if match_total:
-                total_amount = int(match_total.group(1))
+        if not line or any(ig in line for ig in ignore_list):
             continue
 
-        # 2. 識別商品行 (格式: 商品名 [空格] ¥價格 [輕])
-        # 正則解釋：抓取開頭文字，中間有空格或貨幣符號，最後是數字，後方可能有個「軽」
-        match_item = re.search(r'^(.+?)\s+[¥￥]?\s*(\d+)\s*[軽]?$', line)
-        if match_item:
-            name = clean_text(match_item.group(1))
-            price = int(match_item.group(2))
-            # 排除掉純數字或太短的誤判行
-            if name and not name.isdigit() and len(name) > 1:
-                items.append({'name': name, 'price': price})
+        # A. 識別合計金額
+        if '合計' in line or '合 計' in line:
+            nums = re.findall(r'\d+', line.replace(",", ""))
+            if nums:
+                total_amount = int(nums[-1])
+            continue
 
-    # 預防機制：如果沒抓到總價，計算商品總和
-    if total_amount == 0 and items:
-        total_amount = sum(item['price'] for item in items)
+        # B. 識別金額行 (判斷是否包含價格)
+        # 匹配邏輯：尋找 ¥ 符號或行末數字
+        price_match = re.search(r'[¥￥]?\s*(\d+)[輕軽]?$', line.replace(",", ""))
+        # 檢查這行是否「只有」金額
+        is_only_price = re.fullmatch(r'[¥￥]?\s*(\d+)[輕軽]?', line.replace(",", "").strip())
 
-    return items, total_amount
+        if price_match:
+            price = int(price_match.group(1))
+            
+            # 如果之前有存好的商品名，則配對
+            if (is_only_price or '¥' in line or '￥' in line) and pending_name:
+                found_items.append({'name': pending_name, 'price': price})
+                pending_name = None
+            else:
+                # 嘗試在同一行分割名字和價格
+                parts = re.split(r'\s+[¥￥]?|(?<=[^\d])(?=[¥￥\d])', line)
+                if len(parts) >= 2:
+                    name_part = clean_item_name(parts[0])
+                    if name_part and not name_part.isdigit():
+                        found_items.append({'name': name_part, 'price': price})
+                        pending_name = None
+        else:
+            # C. 沒有金額，視為潛在商品名暫存
+            cleaned = clean_item_name(line)
+            # 排除掉太短、純數字或收據標頭
+            if cleaned and not cleaned.isdigit() and len(cleaned) >= 2:
+                if 'Family' not in cleaned and '領収' not in cleaned:
+                    pending_name = cleaned
 
-def call_ocr_api(filepath):
-    url = 'https://api.ocr.space/parse/image'
-    payload = {
-        'apikey': API_KEY,
-        'language': 'jpn',
-        'isOverlayRequired': False,
-        'OCREngine': 2,
-        'scale': True
-    }
-    with open(filepath, 'rb') as f:
-        r = requests.post(url, files={'file': f}, data=payload)
-    return r.json()
+    # 如果沒抓到合計行，則手動加總
+    if total_amount == 0 and found_items:
+        total_amount = sum(item['price'] for item in found_items)
+
+    return found_items, total_amount
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
     data = {}
     if request.method == 'POST':
-        if 'file' not in request.files: return "No file"
-        file = request.files['file']
-        if file.filename == '': return "No file"
-        
-        if file:
+        file = request.files.get('file')
+        if file and file.filename != '':
             filepath = os.path.join('/tmp', file.filename)
             file.save(filepath)
             try:
-                json_result = call_ocr_api(filepath)
-                raw_text = ""
-                if json_result.get('OCRExitCode') == 1 and json_result.get('ParsedResults'):
-                    raw_text = json_result['ParsedResults'][0]['ParsedText']
-                else:
-                    raw_text = "OCR Error: " + str(json_result.get('ErrorMessage'))
+                # 調用 OCR 服務
+                res = requests.post('https://api.ocr.space/parse/image', 
+                                    files={'file': open(filepath, 'rb')}, 
+                                    data={'apikey': API_KEY, 'language': 'jpn', 'OCREngine': 2, 'scale': True}).json()
+                
+                raw_text = res['ParsedResults'][0]['ParsedText'] if res.get('ParsedResults') else "OCR failed"
+                items, total = parse_receipt(raw_text)
+                
+                # 存入資料庫
+                conn = sqlite3.connect(DB_NAME)
+                c = conn.cursor()
+                c.execute("INSERT INTO history (filename, total_price, upload_time) VALUES (?,?,?)", (file.filename, total, str(datetime.now())))
+                conn.commit()
+                conn.close()
 
-                items, total = parse_receipt_safe(raw_text)
-                save_to_db(file.filename, total)
-                
-                # 準備 CSV 內容
-                csv_output = io.StringIO()
-                writer = csv.writer(csv_output)
+                # 生成 CSV 內容
+                csv_out = io.StringIO()
+                writer = csv.writer(csv_out)
                 writer.writerow(['商品名', '価格'])
-                for item in items:
-                    writer.writerow([item['name'], item['price']])
+                for i in items:
+                    writer.writerow([i['name'], i['price']])
                 writer.writerow(['合計', total])
-                
-                log_content = f"Date: {datetime.now()}\nFile: {file.filename}\n\n[Raw Text]\n{raw_text}\n"
 
                 data = {
-                    'receipt_list': items,  
-                    'total': total,
-                    'raw_text': raw_text,
-                    'csv_data': csv_output.getvalue(),
-                    'log_data': log_content
+                    'receipt_list': items, 
+                    'total': total, 
+                    'raw_text': raw_text, 
+                    'csv_data': csv_out.getvalue(), 
+                    'log_data': f"Date: {datetime.now()}\nFile: {file.filename}\n\n[Raw Text]\n{raw_text}"
                 }
             except Exception as e:
-                return f"<h1>Error</h1><pre>{str(e)}</pre>"
+                return f"Error: {str(e)}"
             finally:
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-            
+                if os.path.exists(filepath): os.remove(filepath)
             return render_template('index.html', data=data)
-
     return render_template('index.html', data=None)
 
 @app.route('/download_csv', methods=['POST'])
 def download_csv():
-    csv_content = request.form.get('csv_content', '')
-    return Response(csv_content, mimetype="text/csv", 
-                    headers={"Content-disposition": "attachment; filename=receipt.csv"})
+    return Response(request.form.get('csv_content'), mimetype="text/csv", headers={"Content-disposition": "attachment; filename=receipt.csv"})
 
 @app.route('/download_log', methods=['POST'])
 def download_log():
-    log_content = request.form.get('log_content', '')
-    return Response(log_content, mimetype="text/plain", 
-                    headers={"Content-disposition": "attachment; filename=ocr.log"})
+    return Response(request.form.get('log_content'), mimetype="text/plain", headers={"Content-disposition": "attachment; filename=ocr.log"})
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=5000)
