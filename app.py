@@ -9,11 +9,8 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# ==========================================
-# OCR.space API KEY
+# OCR API 配置 (請確保 API_KEY 正確)
 API_KEY = 'K83802931788957'
-# ==========================================
-
 DB_NAME = '/tmp/receipts.db'
 
 def init_db():
@@ -45,78 +42,45 @@ def save_to_db(filename, total):
 
 def clean_text(text):
     if not text: return ""
-    text = re.sub(r'[◎軽※¥￥,]', '', text)
-    text = re.sub(r'^\d{4,}\s*', '', text)
+    # 根據要求：保留 ◎，但移除「軽」、星號等雜質
+    text = re.sub(r'[軽※\*]', '', text)
+    # 移除行首可能出現的長序號數字（非商品名部分）
+    text = re.sub(r'^\d{5,}\s*', '', text)
     return text.strip()
 
-def extract_price(text):
-    if not text: return None
-    clean = re.sub(r'[軽\s¥￥,]', '', text)
-    match = re.search(r'(\d+)', clean)
-    if match:
-        return int(match.group(1))
-    return None
-
-def parse_receipt_hybrid(ocr_text):
+def parse_receipt_safe(ocr_text):
     if not ocr_text: return [], 0
     lines = ocr_text.splitlines()
     items = []
     total_amount = 0
     
-    ignore_words = [
-        '電話', 'TEL', '日付', 'Date', 'No.', 'レジ', '責', '領', '収', '証',
-        '対象', '消費税', '税', 'お預り', '釣', '支払', '割引', '値引', 'クーポン', 
-        '店', '会員', 'ポイント', '時刻', 'カード', 'QR', 'アプリ', '番号', '登録'
-    ]
-
-    candidate_names = []
-    candidate_prices = []
+    # 關鍵字過濾：排除無關的收據資訊
+    ignore = ['電話', 'TEL', '新宿', '登録番号', 'レジ', '責No', '領収証', '対象', '內消費税', '交通系', '残高', 'カード番号', '再発行']
 
     for line in lines:
         line = line.strip()
-        if not line: continue
-        
-        if '合' in line and '計' in line:
-            p = extract_price(line)
-            if p: total_amount = p
-            continue 
-
-        if any(w in line for w in ignore_words): continue
+        if not line or any(w in line for w in ignore): continue
         if '2024' in line or '2025' in line: continue
 
-        # Logic A: Inline
-        match_inline = re.search(r'^(.+?)\s+[¥￥]?\s*([0-9,]+)[軽]?$', line)
-        is_matched = False
-        if match_inline:
-            name_part = clean_text(match_inline.group(1))
-            price_part = extract_price(match_inline.group(2))
-            if name_part and not name_part.isdigit() and price_part and 10 <= price_part <= 100000:
-                items.append({'name': name_part, 'price': price_part})
-                is_matched = True
+        # 1. 識別合計金額
+        if '合計' in line.replace(" ", ""):
+            # 抓取該行最後的數字
+            match_total = re.search(r'(\d+)', line.replace(",", "").replace("¥", "").replace("￥", ""))
+            if match_total:
+                total_amount = int(match_total.group(1))
+            continue
 
-        # Logic B: Zipper
-        if not is_matched:
-            price_val = extract_price(line)
-            clean_str = clean_text(line)
-            is_price_line = False
-            if '¥' in line or '￥' in line or '軽' in line:
-                is_price_line = True
-            elif re.match(r'^\s*[0-9,]+\s*$', line):
-                is_price_line = True
-            
-            if is_price_line and price_val is not None:
-                candidate_prices.append(price_val)
-            elif len(clean_str) > 1 and not clean_str.isdigit():
-                candidate_names.append(clean_str)
-
-    if len(candidate_names) > 0 and len(candidate_prices) > 0:
-        count = min(len(candidate_names), len(candidate_prices))
-        for i in range(count):
-            name = candidate_names[i]
-            price = candidate_prices[i]
-            if 10 <= price <= 100000:
+        # 2. 識別商品行 (格式: 商品名 [空格] ¥價格 [輕])
+        # 正則解釋：抓取開頭文字，中間有空格或貨幣符號，最後是數字，後方可能有個「軽」
+        match_item = re.search(r'^(.+?)\s+[¥￥]?\s*(\d+)\s*[軽]?$', line)
+        if match_item:
+            name = clean_text(match_item.group(1))
+            price = int(match_item.group(2))
+            # 排除掉純數字或太短的誤判行
+            if name and not name.isdigit() and len(name) > 1:
                 items.append({'name': name, 'price': price})
 
+    # 預防機制：如果沒抓到總價，計算商品總和
     if total_amount == 0 and items:
         total_amount = sum(item['price'] for item in items)
 
@@ -147,17 +111,17 @@ def index():
             filepath = os.path.join('/tmp', file.filename)
             file.save(filepath)
             try:
-                print(f"Processing: {file.filename}")
                 json_result = call_ocr_api(filepath)
                 raw_text = ""
                 if json_result.get('OCRExitCode') == 1 and json_result.get('ParsedResults'):
                     raw_text = json_result['ParsedResults'][0]['ParsedText']
                 else:
-                    raw_text = "Error: " + str(json_result.get('ErrorMessage'))
+                    raw_text = "OCR Error: " + str(json_result.get('ErrorMessage'))
 
-                items, total = parse_receipt_hybrid(raw_text)
+                items, total = parse_receipt_safe(raw_text)
                 save_to_db(file.filename, total)
                 
+                # 準備 CSV 內容
                 csv_output = io.StringIO()
                 writer = csv.writer(csv_output)
                 writer.writerow(['商品名', '価格'])
@@ -167,22 +131,19 @@ def index():
                 
                 log_content = f"Date: {datetime.now()}\nFile: {file.filename}\n\n[Raw Text]\n{raw_text}\n"
 
-                # 【重要】ここを変数名 'receipt_items' に変更しました！
                 data = {
-                    'receipt_items': items,
+                    'receipt_list': items,  
                     'total': total,
                     'raw_text': raw_text,
                     'csv_data': csv_output.getvalue(),
                     'log_data': log_content
                 }
-
             except Exception as e:
-                import traceback
-                print(traceback.format_exc())
-                return f"<h1>Internal Error</h1><pre>{str(e)}</pre>"
+                return f"<h1>Error</h1><pre>{str(e)}</pre>"
             finally:
                 if os.path.exists(filepath):
                     os.remove(filepath)
+            
             return render_template('index.html', data=data)
 
     return render_template('index.html', data=None)
