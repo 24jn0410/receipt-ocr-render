@@ -11,11 +11,10 @@ from datetime import datetime
 app = Flask(__name__)
 
 # ==========================================
-# API KEY 設定
+# 請確認 API KEY 是否有效
 API_KEY = 'K83802931788957' 
 # ==========================================
 
-# 資料庫路徑 (Render 使用 /tmp)
 DB_NAME = '/tmp/receipts.db'
 
 def init_db():
@@ -45,37 +44,72 @@ def save_to_db(filename, total):
     except Exception as e:
         print(f"Database Save Error: {e}")
 
-def clean_text(text):
-    text = re.sub(r'[◎軽]', '', text)
+def clean_name(text):
+    # 移除特殊的標記符號，如 ◎, 軽, ※, ¥
+    text = re.sub(r'[◎軽※¥￥]', '', text)
+    # 移除開頭可能出現的純數字編號 (例如 4902...)
+    text = re.sub(r'^\d+\s*', '', text)
     return text.strip()
 
 def parse_receipt(ocr_text):
     if not ocr_text: return [], 0
     
-    lines = ocr_text.split('\r\n')
+    lines = ocr_text.splitlines()
     items = []
     total_amount = 0
-    price_pattern = re.compile(r'[¥￥]?\s*([0-9,]+)\s*$')
+    
+    # 1. 忽略列表：只要包含這些字，這行通常不是商品
+    ignore_keywords = [
+        '電話', 'TEL', '日付', '登録', '番号', 'レジ', '責', '領', '収', '証', 
+        '対象', '消費税', 'マネー', '支払', '釣', '預', '現', '合　計', '合計', 
+        '時刻', '店', '会員', 'ポイント', 'カード', 'QR', 'アプリ', 'クーポン'
+    ]
 
     for line in lines:
         line = line.strip()
         if not line: continue
-        if "合　計" in line or "合計" in line: continue
-        if "釣" in line or "預" in line: continue
+        
+        # A. 檢查黑名單
+        is_ignored = False
+        for kw in ignore_keywords:
+            if kw in line:
+                is_ignored = True
+                break
+        if is_ignored: continue
 
-        match = price_pattern.search(line)
-        if match:
-            price_str = match.group(1).replace(',', '')
-            try:
-                price = int(price_str)
-                product_name = line[:match.start()].strip()
-                product_name = clean_text(product_name)
-                
-                if len(product_name) > 0:
-                    items.append({'name': product_name, 'price': price})
-                    total_amount += price
-            except:
-                pass
+        # B. 【寬容版邏輯】
+        # 不使用複雜正則，而是直接切分空白
+        # 假設：每一行的最後一個區塊是價格，前面全部是商品名
+        
+        parts = line.split() # 用空白切割
+        if len(parts) < 2: continue # 如果這行只有一個東西，肯定不是「商品+價格」
+
+        # 嘗試抓取最後一個部分當作價格
+        price_part = parts[-1].replace(',', '').replace('¥', '').replace('￥', '')
+        
+        # 剩下的前面部分當作名字
+        name_part = " ".join(parts[:-1])
+
+        try:
+            # 測試最後一部分是不是數字
+            price = int(price_part)
+            
+            # 清理名字
+            clean_product_name = clean_name(name_part)
+            
+            # 名字太短(小於2字)通常是雜訊
+            if len(clean_product_name) < 2: continue
+            
+            # 過濾掉日期 (例如 2024年...)
+            if "年" in clean_product_name or "月" in clean_product_name: continue
+
+            # 價格範圍檢查 (1元 ~ 10萬元)
+            if 1 <= price <= 100000:
+                items.append({'name': clean_product_name, 'price': price})
+                total_amount += price
+        except:
+            # 如果最後一部分不是數字，這行就不是商品
+            pass
     
     return items, total_amount
 
@@ -85,7 +119,7 @@ def call_ocr_api(filepath):
         'apikey': API_KEY,
         'language': 'jpn',
         'isOverlayRequired': False,
-        'OCREngine': 2
+        'OCREngine': 2 
     }
     with open(filepath, 'rb') as f:
         r = requests.post(url, files={'file': f}, data=payload)
@@ -113,7 +147,7 @@ def index():
                     raw_text = json_result['ParsedResults'][0]['ParsedText']
                 else:
                     error_msg = json_result.get('ErrorMessage') or str(json_result)
-                    return f"<h1>OCR API Error</h1><p>{error_msg}</p>"
+                    raw_text = f"Error: {error_msg}"
 
                 items, total = parse_receipt(raw_text)
                 save_to_db(file.filename, total)
@@ -130,7 +164,6 @@ def index():
                 writer.writerow(['合計', total])
                 csv_string = csv_output.getvalue()
 
-                # 【修正點】這裡使用了新的變數名 receipt_items
                 data = {
                     'receipt_items': items,
                     'total': total,
