@@ -20,7 +20,7 @@
 </head>
 <body>
     <div class="container">
-        <h1>🧾 万能レシート解析 (Hybrid)</h1>
+        <h1>🧾 万能レシート解析</h1>
         
         <div class="upload-area">
             <form method="post" enctype="multipart/form-data">
@@ -41,7 +41,7 @@
                     </tr>
                 </thead>
                 <tbody>
-                    {% for item in data.items %}
+                    {% for item in data.receipt_items %}
                     <tr>
                         <td>{{ item.name }}</td>
                         <td>¥{{ item.price }}</td>
