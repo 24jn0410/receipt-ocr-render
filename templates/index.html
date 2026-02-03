@@ -5,26 +5,28 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Universal Receipt OCR</title>
     <style>
-        body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: #f4f4f4; }
-        .container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-        h1 { text-align: center; color: #333; }
-        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        body { font-family: "Helvetica Neue", Arial, sans-serif; max-width: 800px; margin: 20px auto; padding: 20px; background-color: #f9f9f9; }
+        .container { background: white; border: 1px solid #ddd; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #333; text-align: center; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
         th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
-        th { background: #eee; }
-        .btn { padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; color: white; margin-right: 5px; }
-        .btn-blue { background: #007bff; }
-        .btn-green { background: #28a745; }
-        .btn-gray { background: #6c757d; }
+        th { background-color: #f8f9fa; font-weight: bold; }
+        .btn { display: inline-block; padding: 10px 20px; text-decoration: none; border-radius: 4px; border: none; cursor: pointer; font-size: 16px; margin-right: 10px; }
+        .btn-blue { background: #007bff; color: white; }
+        .btn-green { background: #28a745; color: white; }
+        .btn-gray { background: #6c757d; color: white; }
+        .upload-area { border: 2px dashed #ccc; padding: 20px; text-align: center; margin-bottom: 20px; border-radius: 5px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🧾 万能レシート解析</h1>
-        <div style="text-align: center; margin-bottom: 20px;">
+        <h1>🧾 万能レシート解析 (Hybrid)</h1>
+        
+        <div class="upload-area">
             <form method="post" enctype="multipart/form-data">
                 <input type="file" name="file" required accept="image/*">
                 <br><br>
-                <button type="submit" class="btn btn-blue">アップロード＆解析</button>
+                <button type="submit" class="btn btn-blue">アップロードして解析</button>
             </form>
         </div>
 
@@ -33,7 +35,10 @@
             <h2>解析結果</h2>
             <table>
                 <thead>
-                    <tr><th>商品名</th><th>価格</th></tr>
+                    <tr>
+                        <th>商品名</th>
+                        <th>価格</th>
+                    </tr>
                 </thead>
                 <tbody>
                     {% for item in data.items %}
@@ -42,28 +47,31 @@
                         <td>¥{{ item.price }}</td>
                     </tr>
                     {% endfor %}
-                    <tr style="background: #eef; font-weight: bold;">
+                    <tr style="font-weight: bold; background: #eef;">
                         <td>合計</td>
                         <td>¥{{ data.total }}</td>
                     </tr>
                 </tbody>
             </table>
 
-            <div style="display: flex; margin-top: 20px;">
+            <br>
+            <h3>ダウンロード</h3>
+            <div style="display: flex;">
                 <form action="/download_csv" method="post">
                     <input type="hidden" name="csv_content" value="{{ data.csv_data }}">
-                    <button type="submit" class="btn btn-green">📄 CSV ダウンロード</button>
+                    <button type="submit" class="btn btn-green">📄 CSV</button>
                 </form>
+
                 <form action="/download_log" method="post">
                     <input type="hidden" name="log_content" value="{{ data.log_data }}">
-                    <button type="submit" class="btn btn-gray">📝 ログ保存</button>
+                    <button type="submit" class="btn btn-gray">📝 OCR Log</button>
                 </form>
             </div>
-            
+
             <br>
             <details>
-                <summary>開発者用デバッグ (Raw Text)</summary>
-                <pre style="background:#eee; padding:10px;">{{ data.raw_text }}</pre>
+                <summary style="cursor: pointer; color: #666;">開発者用デバッグ (Raw Text)</summary>
+                <pre style="background: #eee; padding: 10px; overflow-x: auto;">{{ data.raw_text }}</pre>
             </details>
         {% endif %}
     </div>
