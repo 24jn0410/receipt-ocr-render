@@ -2,76 +2,56 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FamilyMart Receipt OCR</title>
+    <title>FamilyMart OCR Parser</title>
     <style>
-        body { font-family: 'Helvetica Neue', Arial, sans-serif; max-width: 800px; margin: 20px auto; padding: 20px; background-color: #f4f7f6; }
-        .container { background: white; border: 1px solid #ddd; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        h1 { text-align: center; color: #006b3d; } /* FamilyMart Color */
-        .upload-section { text-align: center; border: 2px dashed #bbb; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; background: #fff; }
-        th, td { border: 1px solid #eee; padding: 15px; text-align: left; }
-        th { background-color: #006b3d; color: white; }
-        .total-row { font-weight: bold; background: #f0fff0; font-size: 1.2em; }
-        .btn-group { display: flex; gap: 10px; margin-top: 20px; }
-        .btn { flex: 1; padding: 12px; border-radius: 6px; border: none; cursor: pointer; color: white; text-align: center; text-decoration: none; font-weight: bold; }
-        .btn-blue { background: #007bff; }
-        .btn-green { background: #28a745; }
-        .btn-gray { background: #6c757d; }
-        details { margin-top: 20px; color: #666; }
+        body { font-family: sans-serif; max-width: 700px; margin: 40px auto; background: #f0f2f5; line-height: 1.6; }
+        .card { background: white; padding: 25px; border-radius: 10px; shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        h1 { color: #006b3d; text-align: center; border-bottom: 2px solid #006b3d; padding-bottom: 10px; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        th { background: #f8f9fa; }
+        .total { font-weight: bold; background: #e8f5e9; }
+        .btn { display: inline-block; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; border: none; cursor: pointer; margin-top: 10px; }
+        .btn-download { background: #28a745; }
+        .log-btn { background: #6c757d; }
+        pre { background: #eee; padding: 10px; font-size: 12px; overflow-x: auto; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>🏪 FamilyMart レシート解析</h1>
-        
-        <div class="upload-section">
-            <form method="post" enctype="multipart/form-data">
-                <input type="file" name="file" required accept="image/*">
-                <br><br>
-                <button type="submit" class="btn btn-blue" style="max-width: 200px;">アップロード解析</button>
+    <div class="card">
+        <h1>🧾 レシート解析システム</h1>
+        <form method="post" enctype="multipart/form-data" style="text-align:center;">
+            <input type="file" name="file" accept="image/*" required>
+            <button type="submit" class="btn">アップロード解析</button>
+        </form>
+
+        {% if data %}
+        <h3>抽出結果</h3>
+        <table>
+            <thead><tr><th>商品名</th><th>価格</th></tr></thead>
+            <tbody>
+                {% for item in data.receipt_list %}
+                <tr><td>{{ item.name }}</td><td>¥{{ item.price }}</td></tr>
+                {% endfor %}
+                <tr class="total"><td>合計</td><td>¥{{ data.total }}</td></tr>
+            </tbody>
+        </table>
+
+        <div style="display:flex; gap:10px;">
+            <form action="/download_csv" method="post">
+                <input type="hidden" name="csv_content" value="{{ data.csv_data }}">
+                <button type="submit" class="btn btn-download">CSVをダウンロード</button>
+            </form>
+            <form action="/download_log" method="post">
+                <input type="hidden" name="log_content" value="{{ data.log_data }}">
+                <button type="submit" class="btn log-btn">ocr.logをダウンロード</button>
             </form>
         </div>
 
-        {% if data %}
-            <hr>
-            <h2>抽出結果</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>項目</th>
-                        <th>金額</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for item in data.receipt_list %}
-                    <tr>
-                        <td>{{ item.name }}</td>
-                        <td>¥{{ item.price }}</td>
-                    </tr>
-                    {% endfor %}
-                    <tr class="total-row">
-                        <td>合計</td>
-                        <td>¥{{ data.total }}</td>
-                    </tr>
-                </tbody>
-            </table>
-
-            <div class="btn-group">
-                <form action="/download_csv" method="post" style="flex: 1;">
-                    <input type="hidden" name="csv_content" value="{{ data.csv_data }}">
-                    <button type="submit" class="btn btn-green">CSVダウンロード</button>
-                </form>
-                <form action="/download_log" method="post" style="flex: 1;">
-                    <input type="hidden" name="log_content" value="{{ data.log_data }}">
-                    <button type="submit" class="btn btn-gray">ocr.logダウンロード</button>
-                </form>
-            </div>
-            
-            <details>
-                <summary>OCR 生テキスト (デバッグ用)</summary>
-                <pre style="background: #f8f8f8; padding: 15px; border-radius: 5px; font-size: 12px; overflow-x: auto;">{{ data.raw_text }}</pre>
-            </details>
+        <details style="margin-top:20px;">
+            <summary>OCR 生テキスト (ocr.log 内容)</summary>
+            <pre>{{ data.raw_text }}</pre>
+        </details>
         {% endif %}
     </div>
 </body>
