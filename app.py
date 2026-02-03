@@ -1,17 +1,16 @@
-from flask import Flask, render_template, request, send_file, Response
+from flask import Flask, render_template, request, Response
 import requests
 import os
 import re
 import csv
 import io
 import sqlite3
-import json
 from datetime import datetime
 
 app = Flask(__name__)
 
 # ==========================================
-# 請確認 API KEY 是否有效
+# API KEY (OCR.space)
 API_KEY = 'K83802931788957' 
 # ==========================================
 
@@ -44,73 +43,125 @@ def save_to_db(filename, total):
     except Exception as e:
         print(f"Database Save Error: {e}")
 
-def clean_name(text):
-    # 移除特殊的標記符號，如 ◎, 軽, ※, ¥
-    text = re.sub(r'[◎軽※¥￥]', '', text)
-    # 移除開頭可能出現的純數字編號 (例如 4902...)
-    text = re.sub(r'^\d+\s*', '', text)
+# 文字列のクリーニング（◎や軽を削除）
+def clean_text(text):
+    if not text: return ""
+    # ◎, 軽, ※, ¥, ￥, カンマを削除
+    text = re.sub(r'[◎軽※¥￥,]', '', text)
+    # 先頭にある数字（JANコードなど）を削除 (例: 4902... 商品名)
+    text = re.sub(r'^\d{8,}\s*', '', text)
     return text.strip()
 
-def parse_receipt(ocr_text):
+# 価格抽出（数字だけを取り出す）
+def extract_price(text):
+    # 「軽」や「¥」を消してから数字を探す
+    clean = re.sub(r'[軽\s¥￥,]', '', text)
+    match = re.search(r'(\d+)', clean)
+    if match:
+        return int(match.group(1))
+    return None
+
+def parse_receipt_familymart(ocr_text):
     if not ocr_text: return [], 0
     
     lines = ocr_text.splitlines()
     items = []
     total_amount = 0
     
-    # 1. 忽略列表：只要包含這些字，這行通常不是商品
-    ignore_keywords = [
-        '電話', 'TEL', '日付', '登録', '番号', 'レジ', '責', '領', '収', '証', 
-        '対象', '消費税', 'マネー', '支払', '釣', '預', '現', '合　計', '合計', 
-        '時刻', '店', '会員', 'ポイント', 'カード', 'QR', 'アプリ', 'クーポン'
+    # 1. 解析エリアの限定
+    # 「領収証」から「合計」の間にある行だけが商品の候補
+    start_keywords = ['領', '収', '証']
+    end_keywords = ['合', '計']
+    
+    start_index = -1
+    end_index = -1
+
+    # 開始位置を探す
+    for i, line in enumerate(lines):
+        if any(k in line for k in start_keywords) and '登録番号' not in line:
+            start_index = i
+            break
+    
+    # 終了位置（合計）を探す
+    for i, line in enumerate(lines):
+        if i > start_index and any(k in line for k in end_keywords):
+            # 合計行から金額を抽出しておく
+            p = extract_price(line)
+            if p: total_amount = p
+            end_index = i
+            break
+            
+    # もし「領収証」が見つからなければ、最初から「合計」までを見る
+    if start_index == -1: start_index = 0
+    if end_index == -1: end_index = len(lines)
+
+    # 2. 候補行の抽出
+    body_lines = lines[start_index+1 : end_index]
+    
+    candidate_names = []
+    candidate_prices = []
+
+    # 無視するキーワード（ノイズ除去）
+    ignore_words = [
+        '電話', 'TEL', '日付', 'Date', 'No.', 'レジ', '責', 
+        '対象', '消費税', '税', '点', 'お預り', '釣', '支払', 
+        '割引', '値引', 'クーポン', '小計'
     ]
 
-    for line in lines:
+    for line in body_lines:
         line = line.strip()
         if not line: continue
         
-        # A. 檢查黑名單
-        is_ignored = False
-        for kw in ignore_keywords:
-            if kw in line:
-                is_ignored = True
-                break
-        if is_ignored: continue
+        # 無視キーワードが含まれていたらスキップ
+        if any(w in line for w in ignore_words): continue
+        if '2024年' in line or '2025年' in line: continue # 日付スキップ
 
-        # B. 【寬容版邏輯】
-        # 不使用複雜正則，而是直接切分空白
-        # 假設：每一行的最後一個區塊是價格，前面全部是商品名
+        # 行の特徴を分析
+        price_val = extract_price(line)
+        cleaned_str = clean_text(line)
+
+        # パターンA: 同じ行に「商品名」と「価格」がある場合 (例: チョコパン ¥168)
+        # 正規表現: (文字) (スペース) (円マークor数字)
+        match_inline = re.search(r'^(.+?)\s+[¥￥]?\s*([0-9,]+)[軽]?$', line)
+        if match_inline:
+            name_part = clean_text(match_inline.group(1))
+            price_part = extract_price(match_inline.group(2))
+            if name_part and price_part and 10 <= price_part <= 100000:
+                items.append({'name': name_part, 'price': price_part})
+                continue # この行は処理完了
+
+        # パターンB: バラバラの場合のリスト作成
+        # 価格っぽい行（¥が含まれる、または末尾が「軽」）
+        is_price_line = ('¥' in line or '￥' in line or line.endswith('軽')) and price_val is not None
         
-        parts = line.split() # 用空白切割
-        if len(parts) < 2: continue # 如果這行只有一個東西，肯定不是「商品+價格」
+        if is_price_line:
+            candidate_prices.append(price_val)
+        else:
+            # 価格っぽくないなら商品名の候補
+            # 数字だけの行は商品名じゃない
+            if not cleaned_str.isdigit() and len(cleaned_str) > 1:
+                candidate_names.append(cleaned_str)
 
-        # 嘗試抓取最後一個部分當作價格
-        price_part = parts[-1].replace(',', '').replace('¥', '').replace('￥', '')
-        
-        # 剩下的前面部分當作名字
-        name_part = " ".join(parts[:-1])
-
-        try:
-            # 測試最後一部分是不是數字
-            price = int(price_part)
-            
-            # 清理名字
-            clean_product_name = clean_name(name_part)
-            
-            # 名字太短(小於2字)通常是雜訊
-            if len(clean_product_name) < 2: continue
-            
-            # 過濾掉日期 (例如 2024年...)
-            if "年" in clean_product_name or "月" in clean_product_name: continue
-
-            # 價格範圍檢查 (1元 ~ 10萬元)
-            if 1 <= price <= 100000:
-                items.append({'name': clean_product_name, 'price': price})
-                total_amount += price
-        except:
-            # 如果最後一部分不是數字，這行就不是商品
-            pass
+    # 3. パターンBのマッチング (Zip)
+    # すでにインラインで見つかったアイテム以外に、バラバラのやつがあれば結合
+    # リストの長さが同じ、もしくは価格リストの方が少ない場合（商品名が改行されている可能性）
     
+    # 既存のitemsに追加する形で結合
+    if len(candidate_names) > 0 and len(candidate_prices) > 0:
+        # 価格の数に合わせて後ろからマッチングさせる（レシートは上から順だが、OCRのズレを考慮）
+        # 簡単のため、上から順にペアにする戦略をとる
+        count = min(len(candidate_names), len(candidate_prices))
+        for i in range(count):
+            name = candidate_names[i]
+            price = candidate_prices[i]
+            # 極端な価格を除外
+            if 10 <= price <= 100000:
+                items.append({'name': name, 'price': price})
+
+    # 合計金額が0の場合、itemsの合計を計算
+    if total_amount == 0:
+        total_amount = sum(item['price'] for item in items)
+
     return items, total_amount
 
 def call_ocr_api(filepath):
@@ -119,7 +170,8 @@ def call_ocr_api(filepath):
         'apikey': API_KEY,
         'language': 'jpn',
         'isOverlayRequired': False,
-        'OCREngine': 2 
+        'OCREngine': 2, # Engine 2 は表形式に強い
+        'scale': True
     }
     with open(filepath, 'rb') as f:
         r = requests.post(url, files={'file': f}, data=payload)
@@ -149,7 +201,9 @@ def index():
                     error_msg = json_result.get('ErrorMessage') or str(json_result)
                     raw_text = f"Error: {error_msg}"
 
-                items, total = parse_receipt(raw_text)
+                # FamilyMart専用解析ロジック
+                items, total = parse_receipt_familymart(raw_text)
+                
                 save_to_db(file.filename, total)
                 
                 log_content = f"--- Processed at {datetime.now()} ---\n"
@@ -165,7 +219,7 @@ def index():
                 csv_string = csv_output.getvalue()
 
                 data = {
-                    'receipt_items': items,
+                    'receipt_items': items, # HTML側と合わせた変数名
                     'total': total,
                     'raw_text': raw_text,
                     'csv_data': csv_string,
