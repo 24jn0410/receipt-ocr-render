@@ -9,8 +9,11 @@ from datetime import datetime
 
 app = Flask(__name__)
 
+# ==========================================
 # OCR.space API KEY
 API_KEY = 'K83802931788957'
+# ==========================================
+
 DB_NAME = '/tmp/receipts.db'
 
 def init_db():
@@ -41,104 +44,106 @@ def save_to_db(filename, total):
         print(f"Database Save Error: {e}")
 
 def clean_text(text):
+    """清理商品名稱：移除 ◎, 軽, 以及開頭的條碼數字"""
     if not text: return ""
-    # ◎, 軽, ※, ¥, ￥, カンマを削除
+    # 移除特殊符號
     text = re.sub(r'[◎軽※¥￥,]', '', text)
-    # 先頭の長い数字（JANコード等）を削除
-    text = re.sub(r'^\d{8,}\s*', '', text)
+    # 移除開頭像是條碼的長數字 (例如 4902...)
+    text = re.sub(r'^\d{4,}\s*', '', text)
     return text.strip()
 
 def extract_price(text):
-    # 「軽」や「¥」を消してから数字を探す
+    """從字串中提取價格數字"""
+    if not text: return None
+    # 移除 軽, ¥, 空白, 逗號
     clean = re.sub(r'[軽\s¥￥,]', '', text)
+    # 尋找數字
     match = re.search(r'(\d+)', clean)
     if match:
         return int(match.group(1))
     return None
 
-def parse_receipt_universal(ocr_text):
+def parse_receipt_hybrid(ocr_text):
     if not ocr_text: return [], 0
     
     lines = ocr_text.splitlines()
     items = []
     total_amount = 0
     
-    # 解析エリアの限定（ヘッダーとフッターのノイズ除去）
-    start_index = 0
-    end_index = len(lines)
-    
-    for i, line in enumerate(lines):
-        if '領収' in line or '電話' in line or 'TEL' in line:
-            start_index = i
-        if '合' in line and '計' in line:
-            end_index = i + 1 # 合計行まで含む
-            # ここで合計金額取得トライ
-            p = extract_price(line)
-            if p: total_amount = p
+    # 1. 黑名單：過濾掉絕對不是商品的行
+    ignore_words = [
+        '電話', 'TEL', '日付', 'Date', 'No.', 'レジ', '責', '領', '収', '証',
+        '対象', '消費税', '税', 'お預り', '釣', '支払', '割引', '値引', 'クーポン', 
+        '店', '会員', 'ポイント', '時刻', 'カード', 'QR', 'アプリ', '番号', '登録'
+    ]
 
-    # 解析対象の行
-    body_lines = lines[start_index:end_index]
-    
+    # 用來暫存「落單」的商品名和價格
     candidate_names = []
     candidate_prices = []
 
-    ignore_words = ['電話', 'TEL', '日付', 'Date', 'No.', 'レジ', '責', '対象', '消費税', '税', 'お預り', '釣', '支払', '割引', '値引', 'クーポン', '店', '会員']
-
-    for line in body_lines:
+    for line in lines:
         line = line.strip()
         if not line: continue
+        
+        # 嘗試抓取合計金額
+        if '合' in line and '計' in line:
+            p = extract_price(line)
+            if p: total_amount = p
+            continue # 合計行跳過
+
+        # 檢查黑名單
         if any(w in line for w in ignore_words): continue
         if '2024' in line or '2025' in line: continue
 
-        cleaned_str = clean_text(line)
-        price_val = extract_price(line)
-
-        # パターンA：1行に「商品名」と「価格」がある (例: チョコ ¥100)
-        # 条件: 文字列 + スペース + 数字
+        # --- 邏輯 A：同一行有名字和價格 (Inline) ---
+        # 格式：文字 + 空白 + (¥)數字(軽)
         match_inline = re.search(r'^(.+?)\s+[¥￥]?\s*([0-9,]+)[軽]?$', line)
         
+        is_matched = False
         if match_inline:
             name_part = clean_text(match_inline.group(1))
             price_part = extract_price(match_inline.group(2))
             
-            # 名前が数字だけじゃない、かつ価格が正常範囲
+            # 確保名字不是純數字，價格合理
             if name_part and not name_part.isdigit() and price_part and 10 <= price_part <= 100000:
                 items.append({'name': name_part, 'price': price_part})
-                continue # 処理済み
+                is_matched = True
 
-        # パターンB：分離型（名前だけの行、価格だけの行）
-        # 価格っぽい行かどうか判定
-        is_price_line = False
-        if price_val is not None:
-            # 「¥」がある、または「軽」がある、または行のほとんどが数字
+        # --- 邏輯 B：分離式 (Zipper) ---
+        # 如果邏輯 A 沒抓到，就分別收集名字和價格
+        if not is_matched:
+            price_val = extract_price(line)
+            
+            # 判斷這行是不是「價格行」
+            # 特徵：包含 ¥ 或 軽，或者是純數字
+            is_price_line = False
             if '¥' in line or '￥' in line or '軽' in line:
                 is_price_line = True
-            elif len(line) < 10 and re.match(r'^\s*[0-9,]+\s*$', line):
+            elif re.match(r'^\s*[0-9,]+\s*$', line):
                 is_price_line = True
+            
+            if is_price_line and price_val is not None:
+                candidate_prices.append(price_val)
+            else:
+                # 判斷這行是不是「名字行」
+                clean_str = clean_text(line)
+                # 長度大於1，且不是純數字
+                if len(clean_str) > 1 and not clean_str.isdigit():
+                    candidate_names.append(clean_str)
 
-        if is_price_line:
-            candidate_prices.append(price_val)
-        else:
-            # 名前候補（数字だけ、短すぎるものは除外）
-            if len(cleaned_str) > 1 and not cleaned_str.isdigit():
-                candidate_names.append(cleaned_str)
-
-    # ジッパー機能：名前リストと価格リストを結合
-    # Inlineで取れなかった場合のみ発動
+    # 2. 合併落單的名字和價格 (Zipper Logic)
+    # 取兩者數量的最小值進行配對
     if len(candidate_names) > 0 and len(candidate_prices) > 0:
-        # 数が合わない場合、少ない方に合わせる
         count = min(len(candidate_names), len(candidate_prices))
         for i in range(count):
-            # レシート2のような「上から順」に対応
             name = candidate_names[i]
             price = candidate_prices[i]
             
-            # 重複防止：すでにInlineで追加されたものと被っていないかチェック（簡易）
-            if not any(item['price'] == price for item in items):
-                 if 10 <= price <= 100000:
-                    items.append({'name': name, 'price': price})
+            # 簡單過濾極端價格
+            if 10 <= price <= 100000:
+                items.append({'name': name, 'price': price})
 
-    # 合計金額の最終確認
+    # 如果沒抓到合計，就自己加總
     if total_amount == 0 and items:
         total_amount = sum(item['price'] for item in items)
 
@@ -150,7 +155,7 @@ def call_ocr_api(filepath):
         'apikey': API_KEY,
         'language': 'jpn',
         'isOverlayRequired': False,
-        'OCREngine': 2,
+        'OCREngine': 2, # Engine 2 對表格支援較好
         'scale': True
     }
     with open(filepath, 'rb') as f:
@@ -160,6 +165,7 @@ def call_ocr_api(filepath):
 @app.route('/', methods=['GET', 'POST'])
 def index():
     data = {}
+    
     if request.method == 'POST':
         if 'file' not in request.files: return "No file"
         file = request.files['file']
@@ -168,6 +174,7 @@ def index():
         if file:
             filepath = os.path.join('/tmp', file.filename)
             file.save(filepath)
+            
             try:
                 print(f"Processing: {file.filename}")
                 json_result = call_ocr_api(filepath)
@@ -178,10 +185,12 @@ def index():
                 else:
                     raw_text = "Error: " + str(json_result.get('ErrorMessage'))
 
-                items, total = parse_receipt_universal(raw_text)
+                # 使用混合解析邏輯
+                items, total = parse_receipt_hybrid(raw_text)
+                
                 save_to_db(file.filename, total)
                 
-                # CSV生成
+                # 準備 CSV
                 csv_output = io.StringIO()
                 writer = csv.writer(csv_output)
                 writer.writerow(['商品名', '価格'])
@@ -189,10 +198,10 @@ def index():
                     writer.writerow([item['name'], item['price']])
                 writer.writerow(['合計', total])
                 
-                # ログ生成
+                # 準備 Log
                 log_content = f"Date: {datetime.now()}\nFile: {file.filename}\n\n[Raw Text]\n{raw_text}\n"
 
-                # 【重要】ここで変数名を 'items' に統一しています！
+                # 【關鍵】變數名稱統一為 'items'
                 data = {
                     'items': items,
                     'total': total,
@@ -200,26 +209,38 @@ def index():
                     'csv_data': csv_output.getvalue(),
                     'log_data': log_content
                 }
+
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                return f"Internal Error: {e}"
-            finally:
-                if os.path.exists(filepath): os.remove(filepath)
+                # 這裡會把錯誤印在網頁上，而不是 500 Error
+                return f"<h1>Internal Error (Debug)</h1><pre>{traceback.format_exc()}</pre>"
             
+            finally:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+
             return render_template('index.html', data=data)
 
     return render_template('index.html', data=None)
 
 @app.route('/download_csv', methods=['POST'])
 def download_csv():
-    return Response(request.form.get('csv_content', ''), mimetype="text/csv", 
-                   headers={"Content-disposition": "attachment; filename=receipt.csv"})
+    csv_content = request.form.get('csv_content', '')
+    return Response(
+        csv_content,
+        mimetype="text/csv",
+        headers={"Content-disposition": "attachment; filename=receipt.csv"}
+    )
 
 @app.route('/download_log', methods=['POST'])
 def download_log():
-    return Response(request.form.get('log_content', ''), mimetype="text/plain", 
-                   headers={"Content-disposition": "attachment; filename=ocr.log"})
+    log_content = request.form.get('log_content', '')
+    return Response(
+        log_content,
+        mimetype="text/plain",
+        headers={"Content-disposition": "attachment; filename=ocr.log"}
+    )
 
 if __name__ == '__main__':
     app.run(debug=True)
