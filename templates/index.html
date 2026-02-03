@@ -42,13 +42,12 @@
                         <th>価格</th>
                     </tr>
                 </thead>
-                <tbody>
-                    {% for item in data.items %}
-                    <tr>
-                        <td>{{ item.name }}</td>
-                        <td>¥{{ item.price }}</td>
-                    </tr>
-                    {% endfor %}
+               <tbody>
+                {% for item in data.receipt_items %}  <tr>
+                    <td>{{ item.name }}</td>
+                    <td>¥{{ item.price }}</td>
+                </tr>
+                {% endfor %}
                     <tr style="font-weight: bold; background: #eef;">
                         <td>合計</td>
                         <td>¥{{ data.total }}</td>
