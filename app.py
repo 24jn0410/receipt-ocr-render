@@ -129,13 +129,13 @@ def index():
             writer.writerow(['合計', total])
             csv_string = csv_output.getvalue()
 
-            data = {
-                'items': items,
-                'total': total,
-                'raw_text': raw_text,
-                'csv_data': csv_string,
-                'log_data': log_content
-            }
+          data = {
+            'receipt_items': items,  
+            'total': total,
+            'raw_text': raw_text,
+            'csv_data': csv_string,
+            'log_data': log_content
+        }
 
             try:
                 os.remove(file.filename)
@@ -166,4 +166,5 @@ def download_log():
 
 if __name__ == '__main__':
     # Azure VM 需要監聽 0.0.0.0 port 80
+
     app.run(host='0.0.0.0', port=80)
